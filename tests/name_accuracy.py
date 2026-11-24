@@ -30,7 +30,7 @@ HELDOUT_NAMES = [
     "Nurul Syahirah Azman", "Aqil Haziq", "Zulaikha Rosli", "Mohd Amirul Hakim", "Linda Masidi",
 ]
 HELDOUT_TEMPLATES = [
-    "Nama: {}\nNo. KP: 900101-14-5678",
+    "Nama: {}\nNo. KP: 900101-18-5678",
     "Kepada {},\nTerima kasih atas permohonan anda.",
     "The claimant, {}, was admitted on 3 March.",
     "Laporan disediakan oleh {} pada 5 Jun 2026.",

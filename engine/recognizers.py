@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 
 from presidio_analyzer import EntityRecognizer, Pattern, PatternRecognizer, RecognizerResult
+from presidio_analyzer.predefined_recognizers import EmailRecognizer
 
 
 class MyKadRecognizer(PatternRecognizer):
@@ -59,8 +60,48 @@ MY_PASSPORT = PatternRecognizer(
     context=["passport", "pasport"],
 )
 
+_MONTHS = ("januari|februari|mac|april|mei|jun|julai|ogos|september|oktober|november|disember|"
+           "january|february|march|may|june|july|august|october|december|"
+           "jan|feb|mar|apr|jul|aug|ogo|sep|sept|okt|oct|nov|dis|dec")
+
+
+class DateOfBirthRecognizer(PatternRecognizer):
+    """A date is only a date of birth with a birth word just before it ("Tarikh Lahir", "Date of birth", "DOB").
+    Base score is below MIN_SCORE, so letter dates without such context are not flagged."""
+
+    def __init__(self):
+        super().__init__(
+            supported_entity="DATE_OF_BIRTH",
+            name="DateOfBirthRecognizer",
+            patterns=[
+                Pattern("dob_numeric", r"\b\d{1,2}[/.-]\d{1,2}[/.-](?:19|20)\d{2}\b", 0.1),
+                Pattern("dob_text", rf"\b\d{{1,2}}\s+(?i:{_MONTHS})\.?\s+(?:19|20)\d{{2}}\b", 0.1),
+            ],
+            context=["lahir", "birth", "dob", "born"],
+        )
+
+    def invalidate_result(self, pattern_text):
+        parts = re.split(r"[/.-]", pattern_text)
+        if len(parts) != 3:
+            return False  # text month: the regex already limits it
+        try:
+            date(int(parts[2]), int(parts[1]), int(parts[0]))  # Malaysian order: day/month/year
+            return False
+        except ValueError:
+            return True
+
+
+class OfflineEmailRecognizer(EmailRecognizer):
+    """Presidio checks the domain ending with tldextract, which downloads the public suffix list from the
+    internet and rejects unknown endings (internal domains). Skip that check: no network, better recall."""
+
+    def validate_result(self, pattern_text):
+        return None
+
+
 # --- Addresses -------------------------------------------------------------------------------
-_SEP = r"[ \t]+"  # name/address words stay on one line
+_SEP = r"[ \t]+"  # name/address words stay on one line...
+_SEP_WRAP = r"(?:[ \t]+|[ \t]*\n[ \t]*)"  # ...except where a line wrap is expected
 _ADDR_KW = (r"(?:(?i:jalan|jln|lorong|lrg|persiaran|lebuhraya|lebuh|taman|tmn|kampung|kampong|lengkok|"
             r"lingkaran|pangsapuri|apartment|desa|bandar)|Kg)")
 _ADDR_WORD = r"[A-Z0-9][\w'’/-]*"
@@ -68,9 +109,10 @@ MY_ADDRESS = PatternRecognizer(
     supported_entity="MY_ADDRESS",
     name="MyAddressRecognizer",
     patterns=[
-        # "No. 12, Jalan Mawar 3", "Lot 88 Kampung Baru", "Taman Sri Kajang"
-        Pattern("street", rf"(?:\b(?i:no|lot|unit)\.?[ \t]*[\dA-Z][\w/-]*,?{_SEP})?\b{_ADDR_KW}\.?"
-                          rf"{_SEP}{_ADDR_WORD}(?:{_SEP}{_ADDR_WORD}){{0,4}}", 0.9),
+        # "No. 12, Jalan Mawar 3", "18, Jalan SS 2/24", "Lot 88 Kampung Baru", "Taman Sri Kajang";
+        # the street name may wrap to the next line right after "Jalan"
+        Pattern("street", rf"(?:(?:\b(?i:no|lot|unit)\.?[ \t]*[\dA-Z][\w/-]*|\b\d+[A-Z]?(?:-\d+)?),?{_SEP})?"
+                          rf"\b{_ADDR_KW}\.?{_SEP_WRAP}{_ADDR_WORD}(?:{_SEP}{_ADDR_WORD}){{0,4}}", 0.9),
         # postcode (01000-98999) + town: "43000 Kajang"
         Pattern("postcode_town", r"\b(?:0[1-9]|[1-8]\d|9[0-8])\d{3}[ \t]+[A-Z][A-Za-z]+(?:[ \t]+[A-Z][A-Za-z]+){0,2}", 0.6),
     ],
@@ -88,6 +130,7 @@ tarikh rujukan ruj perkara sila hubungi terima kasih doktor doctor pegawai offic
 kerani jururawat nurse rawatan laporan kepada daripada saya kami anda yang berkenaan berhormat hormat
 encik en puan pn cik tuan mr mrs ms madam dr prof ir dear name customer applicant patient claimant complainant
 witness insured beneficiary contact please to from the and of di dan pada oleh untuk dengan atas dari ke ini itu
+person borang permohonan urus setia lampiran maklumat minit
 januari februari mac april jun julai ogos september oktober november disember
 january february march may june july august october december jan feb mar apr jul aug sep sept oct nov dec
 """.split())
@@ -97,6 +140,7 @@ jabatan kementerian majlis universiti hospital klinik sekolah kolej institut mas
 syarikat persatuan lembaga pejabat mahkamah polis perbandaran bandaraya daerah kerajaan pusat jalan taman kampung
 lorong persiaran sdn bhd berhad trading enterprise agung tahunan kebangsaan negara pendaftaran kesihatan pelajaran
 khidmat bahagian unit seksyen company ministry department university school court council
+yayasan kompleks menara wisma bangunan pentadbiran foundation
 """.split())
 PLACES = set("""
 johor kedah kelantan melaka pahang perak perlis pinang penang sabah sarawak selangor terengganu sembilan putrajaya
@@ -124,8 +168,9 @@ class MalaysianNameRecognizer(EntityRecognizer):
 
     RULES = [
         # "Siti Aminah binti Rahman", "Rajesh a/l Subramaniam", "Jimmy anak Jugah"
-        ("patronymic", 0.9, rf"\b(?P<name>{_W}(?:{_SEP}{_W}){{0,3}}{_SEP}(?i:bin|binti|bt|bte|a/l|a/p|anak){_SEP}"
-                            rf"{_W}(?:{_SEP}{_W}){{0,3}})"),
+        # may wrap in a narrow table cell: "Muhammad Aiman Hakimi\nbin Zulkarnain"
+        ("patronymic", 0.9, rf"\b(?P<name>{_W}(?:{_SEP_WRAP}{_W}){{0,3}}{_SEP_WRAP}"
+                            rf"(?i:bin|binti|bt|bte|a/l|a/p|anak){_SEP_WRAP}{_W}(?:{_SEP_WRAP}{_W}){{0,3}})"),
         # title is part of the name: "Dato' Seri Kamarul Ariffin", "Haji Ismail Kassim"
         ("title", 0.85, rf"\b(?P<name>{_TITLE}(?:{_SEP}{_W}){{1,5}})"),
         # honorific is not: "Encik Farid Kamil" -> "Farid Kamil"
@@ -152,4 +197,4 @@ class MalaysianNameRecognizer(EntityRecognizer):
 
 
 def malaysian_recognizers():
-    return [MyKadRecognizer(), MY_PHONE, MY_BANK_ACCOUNT, MY_PASSPORT, MY_ADDRESS, MalaysianNameRecognizer()]
+    return [OfflineEmailRecognizer(), DateOfBirthRecognizer(), MyKadRecognizer(), MY_PHONE, MY_BANK_ACCOUNT, MY_PASSPORT, MY_ADDRESS, MalaysianNameRecognizer()]
